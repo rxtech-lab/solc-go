@@ -2,6 +2,7 @@ package solc
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -122,9 +123,10 @@ func TestSolc(t *testing.T) {
 }
 
 func testSolc(t *testing.T, test testCase) {
-	// Read Solsjon file
-	solc, err := NewFromFile(fmt.Sprintf("./solc-bin/soljson-v%v.js", test.commit))
-	require.NoError(t, err, "Creating Solc from valid solc emscripten binary should not error")
+	// Get Solc from version
+	version := strings.Split(test.commit, "+")[0] // Extract version from commit string like "0.6.2+commit.bacdbe57"
+	solc, err := NewWithVersion(version)
+	require.NoError(t, err, "Creating Solc from version should not error")
 
 	// Test License and Version methods
 	assert.Greater(t, len(solc.License()), 10, "License should be valid")

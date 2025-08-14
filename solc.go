@@ -2,186 +2,235 @@ package solc
 
 import (
 	"encoding/json"
-	"io/ioutil"
-	"path"
+	"fmt"
 	"strings"
 	"sync"
 
 	"rogchap.com/v8go"
 )
 
+// Solc represents a Solidity compiler interface.
 type Solc interface {
+	// License returns the license information of the compiler.
 	License() string
+	// Version returns the version information of the compiler.
 	Version() string
+	// Compile compiles Solidity source code with the given input configuration.
 	Compile(input *Input) (*Output, error)
-	Close()
+	// Close releases all resources associated with the compiler instance.
+	Close() error
 }
 
+// baseSolc implements the Solc interface using V8 JavaScript engine.
 type baseSolc struct {
 	isolate *v8go.Isolate
 	ctx     *v8go.Context
 
-	// protect underlying v8 context from concurrent access
-	mux *sync.Mutex
+	// mu protects the underlying v8 context from concurrent access
+	mu sync.Mutex
 
-	version *v8go.Value
-	license *v8go.Value
-	compile *v8go.Value
+	version *v8go.Function
+	license *v8go.Function
+	compile *v8go.Function
+
+	closed bool
 }
 
-// New creates a new Solc binding using the underlying soljonjs emscripten binary
+// New creates a new Solc binding using the provided soljson.js emscripten binary.
 func New(soljsonjs string) (Solc, error) {
-	return new(soljsonjs)
+	return newBaseSolc(soljsonjs)
 }
 
-func new(soljsonjs string) (*baseSolc, error) {
-	// Create v8go JS execution context
-	isolate, err := v8go.NewIsolate()
-	if err != nil {
-		return nil, err
+// newBaseSolc creates and initializes a new baseSolc instance.
+func newBaseSolc(soljsonjs string) (*baseSolc, error) {
+	if soljsonjs == "" {
+		return nil, fmt.Errorf("soljsonjs cannot be empty")
 	}
-	ctx, _ := v8go.NewContext(isolate)
+	// Create v8go JS execution context
+	isolate := v8go.NewIsolate()
+	ctx := v8go.NewContext(isolate)
 
 	// Create Solc object
 	solc := &baseSolc{
-		mux:     &sync.Mutex{},
 		isolate: isolate,
 		ctx:     ctx,
 	}
 
 	// Initialize solc
-	err = solc.init(soljsonjs)
-	if err != nil {
-		return nil, err
+	if err := solc.init(soljsonjs); err != nil {
+		solc.cleanup()
+		return nil, fmt.Errorf("failed to initialize compiler: %w", err)
 	}
 
 	return solc, nil
 }
 
-func (solc *baseSolc) init(soljsonjs string) error {
-	// Execute solcjson.js script
-	_, err := solc.ctx.RunScript(soljsonjs, "soljson.js")
-	if err != nil {
-		return err
+// init initializes the Solidity compiler by executing the soljson.js script
+// and binding the necessary functions.
+func (s *baseSolc) init(soljsonjs string) error {
+	// Execute soljson.js script
+	if _, err := s.ctx.RunScript(soljsonjs, "soljson.js"); err != nil {
+		return fmt.Errorf("failed to execute soljson.js: %w", err)
 	}
 
 	// Bind version function
+	versionFunc := "version"
 	if strings.Contains(soljsonjs, "_solidity_version") {
-		solc.version, err = solc.ctx.RunScript("Module.cwrap('solidity_version', 'string', [])", "wrap_version.js")
-		if err != nil {
-			return err
-		}
-	} else {
-		solc.version, err = solc.ctx.RunScript("Module.cwrap('version', 'string', [])", "wrap_version.js")
-		if err != nil {
-			return err
-		}
+		versionFunc = "solidity_version"
+	}
+	var err error
+	versionVal, err := s.ctx.RunScript(fmt.Sprintf("Module.cwrap('%s', 'string', [])", versionFunc), "wrap_version.js")
+	if err != nil {
+		return fmt.Errorf("failed to bind version function: %w", err)
+	}
+	s.version, err = versionVal.AsFunction()
+	if err != nil {
+		return fmt.Errorf("version binding is not a function: %w", err)
 	}
 
 	// Bind license function
 	if strings.Contains(soljsonjs, "_solidity_license") {
-		solc.license, err = solc.ctx.RunScript("Module.cwrap('solidity_license', 'string', [])", "wrap_license.js")
+		licenseVal, err := s.ctx.RunScript("Module.cwrap('solidity_license', 'string', [])", "wrap_license.js")
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to bind license function: %w", err)
+		}
+		s.license, err = licenseVal.AsFunction()
+		if err != nil {
+			return fmt.Errorf("license binding is not a function: %w", err)
 		}
 	} else if strings.Contains(soljsonjs, "_license") {
-		solc.license, err = solc.ctx.RunScript("Module.cwrap('license', 'string', [])", "wrap_license.js")
+		licenseVal, err := s.ctx.RunScript("Module.cwrap('license', 'string', [])", "wrap_license.js")
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to bind license function: %w", err)
+		}
+		s.license, err = licenseVal.AsFunction()
+		if err != nil {
+			return fmt.Errorf("license binding is not a function: %w", err)
 		}
 	}
 
 	// Bind compile function
-	solc.compile, err = solc.ctx.RunScript("Module.cwrap('solidity_compile', 'string', ['string', 'number', 'number'])", "wrap_compile.js")
+	compileVal, err := s.ctx.RunScript("Module.cwrap('solidity_compile', 'string', ['string', 'number', 'number'])", "wrap_compile.js")
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to bind compile function: %w", err)
+	}
+	s.compile, err = compileVal.AsFunction()
+	if err != nil {
+		return fmt.Errorf("compile binding is not a function: %w", err)
 	}
 
 	return nil
 }
 
-func (solc *baseSolc) Close() {
-	solc.mux.Lock()
-	defer solc.mux.Lock()
-	solc.ctx.Close()
-	solc.isolate.Close()
-}
+// Close releases all resources associated with the compiler instance.
+func (s *baseSolc) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-func (solc *baseSolc) License() string {
-	if solc.license != nil {
-		solc.mux.Lock()
-		defer solc.mux.Lock()
-		val, _ := solc.license.Call(solc.ctx, nil)
-		return val.String()
+	if s.closed {
+		return nil
 	}
-	return ""
+
+	s.cleanup()
+	s.closed = true
+	return nil
 }
 
-func (solc *baseSolc) Version() string {
-	if solc.version != nil {
-		solc.mux.Lock()
-		defer solc.mux.Lock()
-		val, _ := solc.version.Call(solc.ctx, nil)
-		return val.String()
+// cleanup releases V8 resources without acquiring the mutex.
+func (s *baseSolc) cleanup() {
+	if s.ctx != nil {
+		s.ctx.Close()
+		s.ctx = nil
 	}
-	return ""
+	if s.isolate != nil {
+		s.isolate.Dispose()
+		s.isolate = nil
+	}
 }
 
-func (solc *baseSolc) Compile(input *Input) (*Output, error) {
-	// Marshal Solc Compiler Input
-	b, err := json.Marshal(input)
+// License returns the license information of the compiler.
+func (s *baseSolc) License() string {
+	if s.license == nil {
+		return ""
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.closed {
+		return ""
+	}
+
+	val, err := s.license.Call(v8go.Undefined(s.ctx.Isolate()))
 	if err != nil {
-		return nil, err
+		return ""
+	}
+	return val.String()
+}
+
+// Version returns the version information of the compiler.
+func (s *baseSolc) Version() string {
+	if s.version == nil {
+		return ""
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.closed {
+		return ""
+	}
+
+	val, err := s.version.Call(v8go.Undefined(s.ctx.Isolate()))
+	if err != nil {
+		return ""
+	}
+	return val.String()
+}
+
+// Compile compiles Solidity source code with the given input configuration.
+func (s *baseSolc) Compile(input *Input) (*Output, error) {
+	if input == nil {
+		return nil, fmt.Errorf("input cannot be nil")
+	}
+
+	// Marshal Solc Compiler Input
+	inputJSON, err := json.Marshal(input)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal input: %w", err)
 	}
 
 	// Run Compilation
-	solc.mux.Lock()
-	defer solc.mux.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	val_in, err := solc.ctx.Create(string(b))
-	if err != nil {
-		return nil, err
-	}
-	val_one, _ := solc.ctx.Create(1)
-	val_out, err := solc.compile.Call(solc.ctx, nil, val_in, val_one, val_one)
-	if err != nil {
-		return nil, err
+	if s.closed {
+		return nil, fmt.Errorf("compiler has been closed")
 	}
 
-	out := &Output{}
-	err = json.Unmarshal([]byte(val_out.String()), out)
-	if err != nil {
-		return nil, err
+	if s.compile == nil {
+		return nil, fmt.Errorf("compile function not available")
 	}
 
-	return out, nil
-}
-
-func NewFromFile(file string) (Solc, error) {
-	soljson, err := ioutil.ReadFile(file)
+	valInput, err := v8go.NewValue(s.ctx.Isolate(), string(inputJSON))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to create input value: %w", err)
 	}
 
-	return New(string(soljson))
-}
-
-const SOLC_BIN_DIR = "./solc-bin"
-
-func Solc6_2_0() Solc {
-	solc, err := NewFromFile(path.Join(SOLC_BIN_DIR, "soljson-v0.6.2+commit.bacdbe57.js"))
+	valOne, err := v8go.NewValue(s.ctx.Isolate(), int32(1))
 	if err != nil {
-		// This should never happend unless binaries are replaced
-		panic(err)
+		return nil, fmt.Errorf("failed to create parameter value: %w", err)
 	}
-	return solc
-}
 
-func Solc5_9_0() Solc {
-	solc, err := NewFromFile(path.Join(SOLC_BIN_DIR, "soljson-v0.5.9+commit.e560f70d.js"))
+	valOutput, err := s.compile.Call(v8go.Undefined(s.ctx.Isolate()), valInput, valOne, valOne)
 	if err != nil {
-		// This should never happend unless binaries are replaced
-		panic(err)
+		return nil, fmt.Errorf("compilation failed: %w", err)
 	}
-	return solc
+
+	output := &Output{}
+	if err := json.Unmarshal([]byte(valOutput.String()), output); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal output: %w", err)
+	}
+
+	return output, nil
 }
