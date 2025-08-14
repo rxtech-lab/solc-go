@@ -1,10 +1,14 @@
-module github.com/nmvalera/solc-go
+module github.com/rxtech-lab/solc-go
 
-go 1.13
+go 1.24
 
 require (
-	github.com/stretchr/testify v1.4.0
-	rogchap.com/v8go v0.2.0
+	github.com/stretchr/testify v1.9.0
+	rogchap.com/v8go v0.9.0
 )
 
-replace rogchap.com/v8go => github.com/nmvalera/v8go v0.2.1-0.20200219171212-120cb03004f6
+require (
+	github.com/davecgh/go-spew v1.1.1 // indirect
+	github.com/pmezard/go-difflib v1.0.0 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
+)
