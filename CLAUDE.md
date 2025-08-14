@@ -8,7 +8,34 @@ This is a Go library that provides Golang bindings for the Solidity compiler. It
 
 ## Development Commands
 
-### Build and Test
+### Build and Test (using Makefile)
+```bash
+# Build the package
+make build
+
+# Run all tests
+make test
+
+# Format code
+make fmt
+
+# Run all steps (fmt, build, test)
+make all
+
+# Clean build artifacts
+make clean
+
+# Update dependencies
+make tidy
+
+# Run linter (if available)
+make lint
+
+# Show help
+make help
+```
+
+### Direct Go Commands
 ```bash
 # Build the package
 go build .
@@ -44,10 +71,11 @@ go mod tidy
 ### Core Components
 
 **solc.go** - Main compiler interface and implementation:
-- `Solc` interface: Core API for license, version, compile, and cleanup
+- `Solc` interface: Core API for license, version, compile, and cleanup with proper error handling
 - `baseSolc` struct: V8-based implementation using v8go for JavaScript execution
-- Handles Emscripten binary initialization and function binding
-- Thread-safe compilation with mutex protection
+- Thread-safe compilation with mutex protection and closed state tracking
+- Proper resource cleanup with `cleanup()` method and error propagation
+- Comprehensive documentation and Go best practices compliance
 
 **embedded.go** - Embedded binary management:
 - Uses Go 1.16+ `embed` directive to package Solidity binaries
@@ -74,10 +102,11 @@ go mod tidy
 ### V8 Integration
 
 The library executes Emscripten-compiled Solidity binaries in V8:
-- Creates isolated V8 contexts for each compiler instance
-- Binds Emscripten functions (`version`, `license`, `compile`) to Go
+- Creates isolated V8 contexts for each compiler instance using v8go v0.9.0+ API
+- Binds Emscripten functions (`version`, `license`, `compile`) to Go with proper function casting
 - Handles different function naming conventions across Solidity versions
 - JSON marshaling for input/output between Go and JavaScript
+- Proper resource disposal using `isolate.Dispose()` instead of deprecated `Close()`
 
 ### Automation Scripts
 
@@ -89,8 +118,8 @@ Located in `scripts/` directory, these handle embedded binary maintenance:
 
 ## Key Dependencies
 
-- **v8go**: V8 JavaScript engine bindings (custom fork at github.com/nmvalera/v8go)
-- **testify**: Testing framework for assertions and test organization
+- **v8go v0.9.0**: V8 JavaScript engine bindings (rogchap.com/v8go) with ARM64 support
+- **testify v1.9.0**: Testing framework for assertions and test organization
 - **Standard library**: HTTP client, JSON, file I/O
 
 ## CI/CD Integration
@@ -104,9 +133,11 @@ GitHub Actions workflow (`.github/workflows/update-solidity-binaries.yml`):
 ## Important Notes
 
 - Go 1.24+ required for embed directive support
-- V8 dependency may have architecture-specific linking issues on Apple Silicon
+- v8go v0.9.0+ provides ARM64 (Apple Silicon) compatibility, resolving previous architecture issues
 - Embedded binaries are large (~8-9MB each) but provide zero-latency compilation
 - The library maintains full backward compatibility with existing Solidity compiler JSON API
+- Thread-safe with proper mutex protection and resource cleanup
+- Follows Go best practices with comprehensive error handling and documentation
 
 ## Version Strategy
 

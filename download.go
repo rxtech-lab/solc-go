@@ -3,6 +3,7 @@ package solc
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"net/http"
 )
@@ -73,7 +74,7 @@ func downloadSolcBinary(filename string) (string, error) {
 		return "", fmt.Errorf("failed to download solc binary: HTTP %d", resp.StatusCode)
 	}
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", fmt.Errorf("failed to read solc binary: %w", err)
 	}

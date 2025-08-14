@@ -22,15 +22,6 @@ clean:
 # Tidy dependencies
 tidy:
 	go mod tidy
-
-# Run linter (if available)
-lint:
-	@if command -v golangci-lint >/dev/null 2>&1; then \
-		golangci-lint run; \
-	else \
-		echo "golangci-lint not installed, skipping lint"; \
-	fi
-
 # Help
 help:
 	@echo "Available targets:"

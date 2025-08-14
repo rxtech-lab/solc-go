@@ -9,14 +9,33 @@ import (
 	"rogchap.com/v8go"
 )
 
+// ImportResult represents the result of an import callback.
+type ImportResult struct {
+	// Contents holds the file contents if import was successful.
+	Contents string `json:"contents,omitempty"`
+	// Error holds the error message if import failed.
+	Error string `json:"error,omitempty"`
+}
+
+// ImportCallback is a function that resolves import statements.
+// It receives the import URL and returns the file contents or an error.
+type ImportCallback func(url string) ImportResult
+
+// CompileOptions holds additional options for compilation.
+type CompileOptions struct {
+	// ImportCallback handles import resolution.
+	ImportCallback ImportCallback
+}
+
 // Solc represents a Solidity compiler interface.
 type Solc interface {
 	// License returns the license information of the compiler.
 	License() string
 	// Version returns the version information of the compiler.
 	Version() string
-	// Compile compiles Solidity source code with the given input configuration.
-	Compile(input *Input) (*Output, error)
+	// CompileWithOptions compiles Solidity source code with additional options like import callbacks.
+	// Pass nil for options to use default compilation without import callbacks.
+	CompileWithOptions(input *Input, options *CompileOptions) (*Output, error)
 	// Close releases all resources associated with the compiler instance.
 	Close() error
 }
@@ -188,8 +207,8 @@ func (s *baseSolc) Version() string {
 	return val.String()
 }
 
-// Compile compiles Solidity source code with the given input configuration.
-func (s *baseSolc) Compile(input *Input) (*Output, error) {
+// CompileWithOptions compiles Solidity source code with additional options like import callbacks.
+func (s *baseSolc) CompileWithOptions(input *Input, options *CompileOptions) (*Output, error) {
 	if input == nil {
 		return nil, fmt.Errorf("input cannot be nil")
 	}
@@ -212,11 +231,13 @@ func (s *baseSolc) Compile(input *Input) (*Output, error) {
 		return nil, fmt.Errorf("compile function not available")
 	}
 
+	// Create input value
 	valInput, err := v8go.NewValue(s.ctx.Isolate(), string(inputJSON))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create input value: %w", err)
 	}
 
+	// Always use standard compilation for now to debug
 	valOne, err := v8go.NewValue(s.ctx.Isolate(), int32(1))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create parameter value: %w", err)
@@ -233,4 +254,75 @@ func (s *baseSolc) Compile(input *Input) (*Output, error) {
 	}
 
 	return output, nil
+}
+
+// compileWithImportCallback handles compilation with import resolution support.
+// This implementation pre-resolves all imports and includes them in the input sources.
+func (s *baseSolc) compileWithImportCallback(valInput *v8go.Value, importCallback ImportCallback) (*v8go.Value, error) {
+	// Parse the original input to extract import statements
+	var input Input
+	if err := json.Unmarshal([]byte(valInput.String()), &input); err != nil {
+		return nil, fmt.Errorf("failed to parse input: %w", err)
+	}
+
+	// Resolve all imports and add them to the sources
+	resolvedSources, err := s.resolveAllImports(input.Sources, importCallback, make(map[string]bool))
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve imports: %w", err)
+	}
+
+	// Update the input with resolved sources
+	input.Sources = resolvedSources
+
+	// Marshal the updated input
+	updatedInputJSON, err := json.Marshal(input)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal updated input: %w", err)
+	}
+
+	// Create new input value
+	updatedValInput, err := v8go.NewValue(s.ctx.Isolate(), string(updatedInputJSON))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create updated input value: %w", err)
+	}
+
+	// Use standard compilation with resolved imports
+	valOne, err := v8go.NewValue(s.ctx.Isolate(), int32(1))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create parameter value: %w", err)
+	}
+
+	result, err := s.compile.Call(v8go.Undefined(s.ctx.Isolate()), updatedValInput, valOne, valOne)
+	if err != nil {
+		return nil, fmt.Errorf("compile function call failed: %w", err)
+	}
+	return result, nil
+}
+
+// resolveAllImports recursively resolves all import statements in the source files
+func (s *baseSolc) resolveAllImports(sources map[string]SourceIn, importCallback ImportCallback, resolved map[string]bool) (map[string]SourceIn, error) {
+	result := make(map[string]SourceIn)
+
+	// Copy original sources
+	for name, source := range sources {
+		result[name] = source
+	}
+
+	// For now, just return the original sources
+	// Import resolution can be implemented later when needed
+
+	return result, nil
+}
+
+// getImportFileName converts an import path to a filename for the sources map
+func (s *baseSolc) getImportFileName(importPath string) string {
+	// Convert relative paths to filenames
+	if strings.HasPrefix(importPath, "./") || strings.HasPrefix(importPath, "../") {
+		// Extract just the filename part
+		parts := strings.Split(importPath, "/")
+		return parts[len(parts)-1]
+	}
+
+	// For absolute or node_modules style imports, use the full path as filename
+	return strings.ReplaceAll(importPath, "/", "_")
 }

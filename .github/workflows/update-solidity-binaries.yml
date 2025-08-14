@@ -3,90 +3,90 @@ name: Update Solidity Binaries
 on:
   schedule:
     # Run every Sunday at 00:00 UTC
-    - cron: '0 0 * * 0'
+    - cron: "0 0 * * 0"
   workflow_dispatch: # Allow manual triggering
 
 jobs:
   update-binaries:
     runs-on: ubuntu-latest
-    
+
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    - name: Set up Go
-      uses: actions/setup-go@v4
-      with:
-        go-version: '1.21'
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: "1.24"
 
-    - name: Fetch latest Solidity version
-      id: fetch-version
-      run: ./scripts/fetch-version.sh
+      - name: Fetch latest Solidity version
+        id: fetch-version
+        run: ./scripts/fetch-version.sh
 
-    - name: Download new binaries
-      if: steps.fetch-version.outputs.update_needed == 'true'
-      id: download
-      run: ./scripts/download-binaries.sh "${{ steps.fetch-version.outputs.latest_version }}"
+      - name: Download new binaries
+        if: steps.fetch-version.outputs.update_needed == 'true'
+        id: download
+        run: ./scripts/download-binaries.sh "${{ steps.fetch-version.outputs.latest_version }}"
 
-    - name: Update embedded.go
-      if: steps.fetch-version.outputs.update_needed == 'true'
-      run: ./scripts/update-embedded.sh "${{ steps.fetch-version.outputs.latest_version }}" "${{ steps.download.outputs.latest_filename }}"
+      - name: Update embedded.go
+        if: steps.fetch-version.outputs.update_needed == 'true'
+        run: ./scripts/update-embedded.sh "${{ steps.fetch-version.outputs.latest_version }}" "${{ steps.download.outputs.latest_filename }}"
 
-    - name: Update README
-      if: steps.fetch-version.outputs.update_needed == 'true'
-      run: ./scripts/update-readme.sh "${{ steps.fetch-version.outputs.latest_version }}"
+      - name: Update README
+        if: steps.fetch-version.outputs.update_needed == 'true'
+        run: ./scripts/update-readme.sh "${{ steps.fetch-version.outputs.latest_version }}"
 
-    - name: Verify build works
-      if: steps.fetch-version.outputs.update_needed == 'true'
-      run: |
-        go mod tidy
-        go build .
-        echo "✅ Build successful with new binaries"
+      - name: Verify build works
+        if: steps.fetch-version.outputs.update_needed == 'true'
+        run: |
+          go mod tidy
+          go build .
+          echo "✅ Build successful with new binaries"
 
-    - name: Create Pull Request
-      if: steps.fetch-version.outputs.update_needed == 'true'
-      uses: peter-evans/create-pull-request@v5
-      with:
-        token: ${{ secrets.GITHUB_TOKEN }}
-        commit-message: |
-          feat: update embedded Solidity to version ${{ steps.fetch-version.outputs.latest_version }}
-          
-          - Updated embedded Solidity compiler from ${{ steps.fetch-version.outputs.current_version }} to ${{ steps.fetch-version.outputs.latest_version }}
-          - Refreshed 0.8.21 LTS binary for integrity
-          - Updated documentation
-          
-          🤖 This is an automated update from the weekly Solidity binary refresh workflow.
-        title: 'feat: update embedded Solidity to v${{ steps.fetch-version.outputs.latest_version }}'
-        body: |
-          ## 📦 Automated Solidity Binary Update
-          
-          This PR updates the embedded Solidity compiler binaries:
-          
-          - **Previous version**: ${{ steps.fetch-version.outputs.current_version }}
-          - **New version**: ${{ steps.fetch-version.outputs.latest_version }}
-          - **LTS version**: 0.8.21 (refreshed)
-          
-          ### Changes Made
-          
-          - ✅ Downloaded latest Solidity compiler binary
-          - ✅ Refreshed 0.8.21 LTS binary  
-          - ✅ Updated `embedded.go` with new version mappings
-          - ✅ Updated README documentation
-          - ✅ Verified build compatibility
-          
-          ### Testing
-          
-          ```bash
-          go build .  # Build verified successfully
-          ```
-          
-          This update is generated automatically every Sunday to keep the embedded Solidity binaries up to date with the latest stable release.
-          
-          **Note**: This only updates the embedded versions. The library still supports downloading any Solidity version on-demand via `NewWithVersion()`.
-        branch: update-solidity-${{ steps.fetch-version.outputs.latest_version }}
-        delete-branch: true
+      - name: Create Pull Request
+        if: steps.fetch-version.outputs.update_needed == 'true'
+        uses: peter-evans/create-pull-request@v5
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: |
+            feat: update embedded Solidity to version ${{ steps.fetch-version.outputs.latest_version }}
 
-    - name: No update needed
-      if: steps.fetch-version.outputs.update_needed == 'false'
-      run: |
-        echo "✅ Embedded binaries are already up to date with the latest Solidity version: ${{ steps.fetch-version.outputs.latest_version }}"
+            - Updated embedded Solidity compiler from ${{ steps.fetch-version.outputs.current_version }} to ${{ steps.fetch-version.outputs.latest_version }}
+            - Refreshed 0.8.21 LTS binary for integrity
+            - Updated documentation
+
+            🤖 This is an automated update from the weekly Solidity binary refresh workflow.
+          title: "feat: update embedded Solidity to v${{ steps.fetch-version.outputs.latest_version }}"
+          body: |
+            ## 📦 Automated Solidity Binary Update
+
+            This PR updates the embedded Solidity compiler binaries:
+
+            - **Previous version**: ${{ steps.fetch-version.outputs.current_version }}
+            - **New version**: ${{ steps.fetch-version.outputs.latest_version }}
+            - **LTS version**: 0.8.21 (refreshed)
+
+            ### Changes Made
+
+            - ✅ Downloaded latest Solidity compiler binary
+            - ✅ Refreshed 0.8.21 LTS binary  
+            - ✅ Updated `embedded.go` with new version mappings
+            - ✅ Updated README documentation
+            - ✅ Verified build compatibility
+
+            ### Testing
+
+            ```bash
+            go build .  # Build verified successfully
+            ```
+
+            This update is generated automatically every Sunday to keep the embedded Solidity binaries up to date with the latest stable release.
+
+            **Note**: This only updates the embedded versions. The library still supports downloading any Solidity version on-demand via `NewWithVersion()`.
+          branch: update-solidity-${{ steps.fetch-version.outputs.latest_version }}
+          delete-branch: true
+
+      - name: No update needed
+        if: steps.fetch-version.outputs.update_needed == 'false'
+        run: |
+          echo "✅ Embedded binaries are already up to date with the latest Solidity version: ${{ steps.fetch-version.outputs.latest_version }}"
