@@ -13,6 +13,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Set up Go
         uses: actions/setup-go@v4
@@ -36,12 +38,13 @@ jobs:
         if: steps.fetch-version.outputs.update_needed == 'true'
         run: ./scripts/update-readme.sh "${{ steps.fetch-version.outputs.latest_version }}"
 
-      - name: Verify build works
+      - name: Verify build and tests work
         if: steps.fetch-version.outputs.update_needed == 'true'
         run: |
           go mod tidy
           go build .
-          echo "✅ Build successful with new binaries"
+          go test -v
+          echo "✅ Build and tests successful with new binaries"
 
       - name: Create Pull Request
         if: steps.fetch-version.outputs.update_needed == 'true'
