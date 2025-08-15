@@ -555,7 +555,7 @@ func TestNewWithVersionEmbeddedVsDownload(t *testing.T) {
 func TestDownloadSolcBinary(t *testing.T) {
 	// Test downloading a specific binary file
 	// Use a known good filename from version resolution
-	filename, err := resolveVersion("0.8.21")
+	filename, err := resolveVersion("0.8.22")
 	require.NoError(t, err, "Should resolve version for test")
 
 	// Download the binary
@@ -571,4 +571,88 @@ func TestDownloadSolcBinary(t *testing.T) {
 	_, err = downloadSolcBinary("invalid-filename.js")
 	assert.Error(t, err, "Should error for invalid filename")
 	assert.Contains(t, err.Error(), "HTTP", "Error should mention HTTP error")
+}
+
+func TestOpenZeppelin(t *testing.T) {
+	code := `
+	// SPDX-License-Identifier: MIT
+	// Compatible with OpenZeppelin Contracts ^5.4.0
+	pragma solidity ^0.8.21;
+
+	import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+
+	contract MyToken is ERC20 {
+		constructor() ERC20("MyToken", "MTK") {}
+	}
+	`
+
+	erc20 := `
+		// SPDX-License-Identifier: MIT
+		pragma solidity ^0.8.21;
+
+		contract ERC20 {
+			string private _name;
+			string private _symbol;
+			
+			constructor(string memory name, string memory symbol) {
+				_name = name;
+				_symbol = symbol;
+			}
+		}
+	`
+
+	compiler, err := NewWithVersion("0.8.21")
+	require.NoError(t, err)
+	defer compiler.Close()
+
+	input := &Input{
+		Language: "Solidity",
+		Sources: map[string]SourceIn{
+			"MyToken.sol": {Content: code},
+		},
+		Settings: Settings{
+			OutputSelection: map[string]map[string][]string{
+				"*": {
+					"*": []string{"abi", "evm.bytecode"},
+				},
+			},
+		},
+	}
+
+	options := &CompileOptions{
+		ImportCallback: func(url string) ImportResult {
+			if strings.HasPrefix(url, "@openzeppelin/contracts/token/ERC20/ERC20.sol") {
+				return ImportResult{Contents: erc20}
+			}
+			return ImportResult{Error: fmt.Sprintf("File not found: %s", url)}
+		},
+	}
+
+	output, err := compiler.CompileWithOptions(input, options)
+	require.NoError(t, err)
+	require.NotNil(t, output)
+
+	// Debug: print full output to see what's happening
+	t.Logf("Compilation output: Contracts=%d, Errors=%d", len(output.Contracts), len(output.Errors))
+
+	if len(output.Contracts) == 0 {
+		t.Logf("No contracts in output. Errors: %+v", output.Errors)
+		if len(output.Errors) > 0 {
+			for _, err := range output.Errors {
+				t.Logf("Error: %s", err.FormattedMessage)
+			}
+		}
+		// Print the raw sources that were compiled
+		t.Logf("Input sources: %+v", input.Sources)
+	} else {
+		// Print successful compilation info
+		for sourceFile, contracts := range output.Contracts {
+			t.Logf("Source %s has %d contracts", sourceFile, len(contracts))
+			for contractName := range contracts {
+				t.Logf("  - Contract: %s", contractName)
+			}
+		}
+	}
+
+	assert.NotEmpty(t, output.Contracts, "Should have compiled contracts")
 }

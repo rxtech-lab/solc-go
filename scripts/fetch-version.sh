@@ -6,7 +6,7 @@ set -e
 echo "Fetching latest Solidity version..."
 
 # Get the latest version from the official API
-LATEST_VERSION=$(curl -s https://binaries.soliditylang.org/wasm/list.json | jq -r '.latestRelease')
+LATEST_VERSION=$(curl -s https://binaries.soliditylang.org/bin/list.json | jq -r '.latestRelease')
 echo "latest_version=$LATEST_VERSION" >> $GITHUB_OUTPUT
 echo "Latest Solidity version: $LATEST_VERSION"
 

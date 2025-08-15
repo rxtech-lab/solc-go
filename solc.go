@@ -50,7 +50,6 @@ type baseSolc struct {
 
 	version *v8go.Function
 	license *v8go.Function
-	compile *v8go.Function
 
 	closed bool
 }
@@ -92,6 +91,20 @@ func (s *baseSolc) init(soljsonjs string) error {
 		return fmt.Errorf("failed to execute soljson.js: %w", err)
 	}
 
+	// Set up debug logging function
+	debugLogFunc := v8go.NewFunctionTemplate(s.isolate, func(info *v8go.FunctionCallbackInfo) *v8go.Value {
+		args := info.Args()
+		if len(args) > 0 {
+			fmt.Printf("JS DEBUG: %s\n", args[0].String())
+		}
+		return v8go.Undefined(s.isolate)
+	})
+
+	debugLog := debugLogFunc.GetFunction(s.ctx)
+	if err := s.ctx.Global().Set("debugLog", debugLog); err != nil {
+		return fmt.Errorf("failed to set debug function: %w", err)
+	}
+
 	// Bind version function
 	versionFunc := "version"
 	if strings.Contains(soljsonjs, "_solidity_version") {
@@ -128,14 +141,145 @@ func (s *baseSolc) init(soljsonjs string) error {
 		}
 	}
 
-	// Bind compile function
-	compileVal, err := s.ctx.RunScript("Module.cwrap('solidity_compile', 'string', ['string', 'number', 'number'])", "wrap_compile.js")
+	// Implement the correct solc.js-compatible wrapper
+	setupScript := `
+		// Create the core compile function binding
+		var nativeCompile = Module.cwrap('solidity_compile', 'string', ['string']);
+		debugLog('DEBUG: Native compile function bound successfully');
+		
+		// Implement solc.js wrapper with iterative import resolution
+		function wrapper(input, importCallback, smtSolverCallback) {
+			debugLog('DEBUG: Wrapper called with importCallback: ' + (importCallback ? 'present' : 'null'));
+			
+			if (!importCallback) {
+				debugLog('DEBUG: No import callback, direct compilation');
+				return nativeCompile(input);
+			}
+			
+			// Parse the input to work with it
+			var inputObj;
+			try {
+				inputObj = JSON.parse(input);
+			} catch (e) {
+				debugLog('DEBUG: Failed to parse input JSON: ' + e.toString());
+				return JSON.stringify({errors: [{severity: "error", formattedMessage: "Invalid input JSON"}]});
+			}
+			
+			// Iteratively resolve imports by compiling and handling import errors
+			var maxIterations = 10;
+			var iteration = 0;
+			
+			while (iteration < maxIterations) {
+				debugLog('DEBUG: Compilation iteration ' + (iteration + 1));
+				
+				// Try compilation
+				var result = nativeCompile(JSON.stringify(inputObj));
+				var resultObj;
+				
+				try {
+					resultObj = JSON.parse(result);
+				} catch (e) {
+					debugLog('DEBUG: Failed to parse result JSON: ' + e.toString());
+					return result; // Return as-is if we can't parse it
+				}
+				
+				// Check if we have import errors
+				var hasImportErrors = false;
+				var importToResolve = null;
+				
+				if (resultObj.errors) {
+					for (var i = 0; i < resultObj.errors.length; i++) {
+						var error = resultObj.errors[i];
+						if (error.type === 'ParserError' && error.message && 
+							error.message.indexOf('not found') !== -1 && 
+							error.message.indexOf('File not supplied initially') !== -1) {
+							
+							// Extract import path from error message or source location
+							var match = error.formattedMessage.match(/import\s+.*?from\s+["']([^"']+)["']/);
+							if (match) {
+								importToResolve = match[1];
+								hasImportErrors = true;
+								debugLog('DEBUG: Found import to resolve: ' + importToResolve);
+								break;
+							}
+						}
+					}
+				}
+				
+				if (!hasImportErrors || !importToResolve) {
+					debugLog('DEBUG: No more import errors, returning result');
+					return result;
+				}
+				
+				// Try to resolve the import
+				debugLog('DEBUG: Resolving import: ' + importToResolve);
+				try {
+					var importResult = importCallback(importToResolve);
+					debugLog('DEBUG: Import resolved: ' + JSON.stringify(importResult));
+					
+					if (importResult.error) {
+						debugLog('DEBUG: Import resolution failed: ' + importResult.error);
+						return result; // Return the compilation result with error
+					}
+					
+					if (importResult.contents) {
+						// Add the resolved source to our input
+						if (!inputObj.sources) {
+							inputObj.sources = {};
+						}
+						inputObj.sources[importToResolve] = { content: importResult.contents };
+						debugLog('DEBUG: Added resolved source for: ' + importToResolve);
+					}
+				} catch (e) {
+					debugLog('DEBUG: Import callback threw error: ' + e.toString());
+					return result; // Return the compilation result with error
+				}
+				
+				iteration++;
+			}
+			
+			debugLog('DEBUG: Max iterations reached, returning last result');
+			return nativeCompile(JSON.stringify(inputObj));
+		}
+		
+		// Create solc interface using the wrapper
+		var solc = {
+			compile: function(input, callbacks) {
+				debugLog('DEBUG: solc.compile called with callbacks: ' + (callbacks ? 'present' : 'null'));
+				
+				var importCallback = null;
+				if (callbacks && callbacks.import && typeof callbacks.import === 'function') {
+					importCallback = callbacks.import;
+					debugLog('DEBUG: Import callback extracted from callbacks object');
+				}
+				
+				// Use the wrapper function
+				return wrapper(input, importCallback, null);
+			}
+		};
+		
+		globalThis.solc = solc;
+		globalThis.compileWithImports = function(inputJson, importCallback) {
+			debugLog('DEBUG: compileWithImports called');
+			return solc.compile(inputJson, importCallback ? { import: importCallback } : null);
+		};
+		
+		solc;
+	`
+
+	_, err = s.ctx.RunScript(setupScript, "compile_wrapper.js")
 	if err != nil {
-		return fmt.Errorf("failed to bind compile function: %w", err)
+		return fmt.Errorf("failed to create compile wrapper: %w", err)
 	}
-	s.compile, err = compileVal.AsFunction()
+
+	// Validate that the setup worked by checking if solc is available
+	solcVal, err := s.ctx.Global().Get("solc")
 	if err != nil {
-		return fmt.Errorf("compile binding is not a function: %w", err)
+		return fmt.Errorf("solc object not created: %w", err)
+	}
+
+	if solcVal.IsUndefined() || solcVal.IsNull() {
+		return fmt.Errorf("solc object is undefined or null")
 	}
 
 	return nil
@@ -227,8 +371,15 @@ func (s *baseSolc) CompileWithOptions(input *Input, options *CompileOptions) (*O
 		return nil, fmt.Errorf("compiler has been closed")
 	}
 
-	if s.compile == nil {
-		return nil, fmt.Errorf("compile function not available")
+	// Get the compile wrapper function
+	compileWrapperVal, err := s.ctx.Global().Get("compileWithImports")
+	if err != nil {
+		return nil, fmt.Errorf("compile wrapper not available: %w", err)
+	}
+
+	compileWrapper, err := compileWrapperVal.AsFunction()
+	if err != nil {
+		return nil, fmt.Errorf("compile wrapper is not a function: %w", err)
 	}
 
 	// Create input value
@@ -237,15 +388,50 @@ func (s *baseSolc) CompileWithOptions(input *Input, options *CompileOptions) (*O
 		return nil, fmt.Errorf("failed to create input value: %w", err)
 	}
 
-	// Always use standard compilation for now to debug
-	valOne, err := v8go.NewValue(s.ctx.Isolate(), int32(1))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create parameter value: %w", err)
-	}
+	var valOutput *v8go.Value
 
-	valOutput, err := s.compile.Call(v8go.Undefined(s.ctx.Isolate()), valInput, valOne, valOne)
-	if err != nil {
-		return nil, fmt.Errorf("compilation failed: %w", err)
+	// Check if we have an import callback
+	if options != nil && options.ImportCallback != nil {
+		// Create JavaScript callback function that calls back to Go
+		callbackFunc := v8go.NewFunctionTemplate(s.ctx.Isolate(), func(info *v8go.FunctionCallbackInfo) *v8go.Value {
+			args := info.Args()
+			if len(args) < 1 {
+				fmt.Printf("DEBUG: Import callback called with no arguments\n")
+				// Create error object
+				errorObj, _ := s.ctx.RunScript(`({"error": "No import path provided"})`, "error_obj.js")
+				return errorObj
+			}
+
+			importPath := args[0].String()
+			result := options.ImportCallback(importPath)
+			var responseScript string
+			if result.Error != "" {
+				responseScript = fmt.Sprintf(`({"error": %q})`, result.Error)
+			} else {
+				responseScript = fmt.Sprintf(`({"contents": %q})`, result.Contents)
+			}
+
+			responseVal, err := s.ctx.RunScript(responseScript, "callback_response.js")
+			if err != nil {
+				errorObj, _ := s.ctx.RunScript(`({"error": "Failed to create response"})`, "error_obj.js")
+				return errorObj
+			}
+			return responseVal
+		})
+
+		callbackInstance := callbackFunc.GetFunction(s.ctx)
+
+		// Call the compile wrapper with the callback
+		valOutput, err = compileWrapper.Call(v8go.Undefined(s.ctx.Isolate()), valInput, callbackInstance)
+		if err != nil {
+			return nil, fmt.Errorf("compilation with import callback failed: %w", err)
+		}
+	} else {
+		// Standard compilation without import callback
+		valOutput, err = compileWrapper.Call(v8go.Undefined(s.ctx.Isolate()), valInput, v8go.Null(s.ctx.Isolate()))
+		if err != nil {
+			return nil, fmt.Errorf("compilation failed: %w", err)
+		}
 	}
 
 	output := &Output{}
@@ -254,75 +440,4 @@ func (s *baseSolc) CompileWithOptions(input *Input, options *CompileOptions) (*O
 	}
 
 	return output, nil
-}
-
-// compileWithImportCallback handles compilation with import resolution support.
-// This implementation pre-resolves all imports and includes them in the input sources.
-func (s *baseSolc) compileWithImportCallback(valInput *v8go.Value, importCallback ImportCallback) (*v8go.Value, error) {
-	// Parse the original input to extract import statements
-	var input Input
-	if err := json.Unmarshal([]byte(valInput.String()), &input); err != nil {
-		return nil, fmt.Errorf("failed to parse input: %w", err)
-	}
-
-	// Resolve all imports and add them to the sources
-	resolvedSources, err := s.resolveAllImports(input.Sources, importCallback, make(map[string]bool))
-	if err != nil {
-		return nil, fmt.Errorf("failed to resolve imports: %w", err)
-	}
-
-	// Update the input with resolved sources
-	input.Sources = resolvedSources
-
-	// Marshal the updated input
-	updatedInputJSON, err := json.Marshal(input)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal updated input: %w", err)
-	}
-
-	// Create new input value
-	updatedValInput, err := v8go.NewValue(s.ctx.Isolate(), string(updatedInputJSON))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create updated input value: %w", err)
-	}
-
-	// Use standard compilation with resolved imports
-	valOne, err := v8go.NewValue(s.ctx.Isolate(), int32(1))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create parameter value: %w", err)
-	}
-
-	result, err := s.compile.Call(v8go.Undefined(s.ctx.Isolate()), updatedValInput, valOne, valOne)
-	if err != nil {
-		return nil, fmt.Errorf("compile function call failed: %w", err)
-	}
-	return result, nil
-}
-
-// resolveAllImports recursively resolves all import statements in the source files
-func (s *baseSolc) resolveAllImports(sources map[string]SourceIn, importCallback ImportCallback, resolved map[string]bool) (map[string]SourceIn, error) {
-	result := make(map[string]SourceIn)
-
-	// Copy original sources
-	for name, source := range sources {
-		result[name] = source
-	}
-
-	// For now, just return the original sources
-	// Import resolution can be implemented later when needed
-
-	return result, nil
-}
-
-// getImportFileName converts an import path to a filename for the sources map
-func (s *baseSolc) getImportFileName(importPath string) string {
-	// Convert relative paths to filenames
-	if strings.HasPrefix(importPath, "./") || strings.HasPrefix(importPath, "../") {
-		// Extract just the filename part
-		parts := strings.Split(importPath, "/")
-		return parts[len(parts)-1]
-	}
-
-	// For absolute or node_modules style imports, use the full path as filename
-	return strings.ReplaceAll(importPath, "/", "_")
 }
