@@ -8,7 +8,7 @@ import (
 	"net/http"
 )
 
-const SOLC_BINARIES_BASE_URL = "https://binaries.soliditylang.org/wasm"
+const SOLC_BINARIES_BASE_URL = "https://binaries.soliditylang.org/bin"
 
 type VersionList struct {
 	Builds   []Build           `json:"builds"`

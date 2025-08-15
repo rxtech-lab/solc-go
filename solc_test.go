@@ -555,7 +555,7 @@ func TestNewWithVersionEmbeddedVsDownload(t *testing.T) {
 func TestDownloadSolcBinary(t *testing.T) {
 	// Test downloading a specific binary file
 	// Use a known good filename from version resolution
-	filename, err := resolveVersion("0.8.21")
+	filename, err := resolveVersion("0.8.22")
 	require.NoError(t, err, "Should resolve version for test")
 
 	// Download the binary
@@ -571,4 +571,299 @@ func TestDownloadSolcBinary(t *testing.T) {
 	_, err = downloadSolcBinary("invalid-filename.js")
 	assert.Error(t, err, "Should error for invalid filename")
 	assert.Contains(t, err.Error(), "HTTP", "Error should mention HTTP error")
+}
+
+func TestOpenZeppelin(t *testing.T) {
+	code := `
+	// SPDX-License-Identifier: MIT
+	// Compatible with OpenZeppelin Contracts ^5.4.0
+	pragma solidity ^0.8.21;
+
+	import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+
+	contract MyToken is ERC20 {
+		constructor() ERC20("MyToken", "MTK") {}
+	}
+	`
+
+	erc20 := `
+		// SPDX-License-Identifier: MIT
+		pragma solidity ^0.8.21;
+
+		contract ERC20 {
+			string private _name;
+			string private _symbol;
+			
+			constructor(string memory name, string memory symbol) {
+				_name = name;
+				_symbol = symbol;
+			}
+		}
+	`
+
+	compiler, err := NewWithVersion("0.8.21")
+	require.NoError(t, err)
+	defer compiler.Close()
+
+	input := &Input{
+		Language: "Solidity",
+		Sources: map[string]SourceIn{
+			"MyToken.sol": {Content: code},
+		},
+		Settings: Settings{
+			OutputSelection: map[string]map[string][]string{
+				"*": {
+					"*": []string{"abi", "evm.bytecode"},
+				},
+			},
+		},
+	}
+
+	options := &CompileOptions{
+		ImportCallback: func(url string) ImportResult {
+			if strings.HasPrefix(url, "@openzeppelin/contracts/token/ERC20/ERC20.sol") {
+				return ImportResult{Contents: erc20}
+			}
+			return ImportResult{Error: fmt.Sprintf("File not found: %s", url)}
+		},
+	}
+
+	output, err := compiler.CompileWithOptions(input, options)
+	require.NoError(t, err)
+	require.NotNil(t, output)
+
+	// Debug: print full output to see what's happening
+	t.Logf("Compilation output: Contracts=%d, Errors=%d", len(output.Contracts), len(output.Errors))
+
+	if len(output.Contracts) == 0 {
+		t.Logf("No contracts in output. Errors: %+v", output.Errors)
+		if len(output.Errors) > 0 {
+			for _, err := range output.Errors {
+				t.Logf("Error: %s", err.FormattedMessage)
+			}
+		}
+		// Print the raw sources that were compiled
+		t.Logf("Input sources: %+v", input.Sources)
+	}
+	assert.NotEmpty(t, output.Contracts, "Should have compiled contracts")
+}
+
+func TestNestedOpenZeppelin(t *testing.T) {
+	code := `
+	// SPDX-License-Identifier: MIT
+	// Compatible with OpenZeppelin Contracts ^5.4.0
+	pragma solidity ^0.8.21;
+
+	import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+
+	contract MyToken is ERC20 {
+		constructor() ERC20("MyToken", "MTK") {}
+	}
+	`
+
+	erc20 := `
+		// SPDX-License-Identifier: MIT
+		pragma solidity ^0.8.21;
+
+		import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+		import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
+		import {Context} from "@openzeppelin/contracts/utils/Context.sol";
+
+		abstract contract ERC20 is Context, IERC20, IERC20Metadata {
+			mapping(address => uint256) private _balances;
+			mapping(address => mapping(address => uint256)) private _allowances;
+			uint256 private _totalSupply;
+			string private _name;
+			string private _symbol;
+			
+			constructor(string memory name_, string memory symbol_) {
+				_name = name_;
+				_symbol = symbol_;
+			}
+
+			function name() public view virtual override returns (string memory) {
+				return _name;
+			}
+
+			function symbol() public view virtual override returns (string memory) {
+				return _symbol;
+			}
+
+			function decimals() public view virtual override returns (uint8) {
+				return 18;
+			}
+
+			function totalSupply() public view virtual override returns (uint256) {
+				return _totalSupply;
+			}
+
+			function balanceOf(address account) public view virtual override returns (uint256) {
+				return _balances[account];
+			}
+
+			function transfer(address to, uint256 amount) public virtual override returns (bool) {
+				address owner = _msgSender();
+				_transfer(owner, to, amount);
+				return true;
+			}
+
+			function allowance(address owner, address spender) public view virtual override returns (uint256) {
+				return _allowances[owner][spender];
+			}
+
+			function approve(address spender, uint256 amount) public virtual override returns (bool) {
+				address owner = _msgSender();
+				_approve(owner, spender, amount);
+				return true;
+			}
+
+			function transferFrom(address from, address to, uint256 amount) public virtual override returns (bool) {
+				_spendAllowance(from, _msgSender(), amount);
+				_transfer(from, to, amount);
+				return true;
+			}
+
+			function _transfer(address from, address to, uint256 amount) internal virtual {
+				require(from != address(0), "ERC20: transfer from the zero address");
+				require(to != address(0), "ERC20: transfer to the zero address");
+				uint256 fromBalance = _balances[from];
+				require(fromBalance >= amount, "ERC20: transfer amount exceeds balance");
+				unchecked {
+					_balances[from] = fromBalance - amount;
+					_balances[to] += amount;
+				}
+				emit Transfer(from, to, amount);
+			}
+
+			function _mint(address account, uint256 amount) internal virtual {
+				require(account != address(0), "ERC20: mint to the zero address");
+				_totalSupply += amount;
+				unchecked {
+					_balances[account] += amount;
+				}
+				emit Transfer(address(0), account, amount);
+			}
+
+			function _approve(address owner, address spender, uint256 amount) internal virtual {
+				require(owner != address(0), "ERC20: approve from the zero address");
+				require(spender != address(0), "ERC20: approve to the zero address");
+				_allowances[owner][spender] = amount;
+				emit Approval(owner, spender, amount);
+			}
+
+			function _spendAllowance(address owner, address spender, uint256 amount) internal virtual {
+				uint256 currentAllowance = allowance(owner, spender);
+				if (currentAllowance != type(uint256).max) {
+					require(currentAllowance >= amount, "ERC20: insufficient allowance");
+					unchecked {
+						_approve(owner, spender, currentAllowance - amount);
+					}
+				}
+			}
+		}
+	`
+
+	iErc20 := `
+		// SPDX-License-Identifier: MIT
+		pragma solidity ^0.8.21;
+
+		interface IERC20 {
+			event Transfer(address indexed from, address indexed to, uint256 value);
+			event Approval(address indexed owner, address indexed spender, uint256 value);
+
+			function totalSupply() external view returns (uint256);
+			function balanceOf(address account) external view returns (uint256);
+			function transfer(address to, uint256 amount) external returns (bool);
+			function allowance(address owner, address spender) external view returns (uint256);
+			function approve(address spender, uint256 amount) external returns (bool);
+			function transferFrom(address from, address to, uint256 amount) external returns (bool);
+		}
+	`
+
+	iErc20Metadata := `
+		// SPDX-License-Identifier: MIT
+		pragma solidity ^0.8.21;
+
+		import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+
+		interface IERC20Metadata is IERC20 {
+			function name() external view returns (string memory);
+			function symbol() external view returns (string memory);
+			function decimals() external view returns (uint8);
+		}
+	`
+
+	context := `
+		// SPDX-License-Identifier: MIT
+		pragma solidity ^0.8.21;
+
+		abstract contract Context {
+			function _msgSender() internal view virtual returns (address) {
+				return msg.sender;
+			}
+
+			function _msgData() internal view virtual returns (bytes calldata) {
+				return msg.data;
+			}
+
+			function _contextSuffixLength() internal view virtual returns (uint256) {
+				return 0;
+			}
+		}
+	`
+
+	compiler, err := NewWithVersion("0.8.21")
+	require.NoError(t, err)
+	defer compiler.Close()
+
+	input := &Input{
+		Language: "Solidity",
+		Sources: map[string]SourceIn{
+			"MyToken.sol": {Content: code},
+		},
+		Settings: Settings{
+			OutputSelection: map[string]map[string][]string{
+				"*": {
+					"*": []string{"abi", "evm.bytecode"},
+				},
+			},
+		},
+	}
+
+	options := &CompileOptions{
+		ImportCallback: func(url string) ImportResult {
+			if strings.HasPrefix(url, "@openzeppelin/contracts/token/ERC20/ERC20.sol") {
+				return ImportResult{Contents: erc20}
+			}
+			if strings.HasPrefix(url, "@openzeppelin/contracts/token/ERC20/IERC20.sol") {
+				return ImportResult{Contents: iErc20}
+			}
+			if strings.HasPrefix(url, "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol") {
+				return ImportResult{Contents: iErc20Metadata}
+			}
+			if strings.HasPrefix(url, "@openzeppelin/contracts/utils/Context.sol") {
+				return ImportResult{Contents: context}
+			}
+			return ImportResult{Error: fmt.Sprintf("File not found: %s", url)}
+		},
+	}
+
+	output, err := compiler.CompileWithOptions(input, options)
+	require.NoError(t, err)
+	require.NotNil(t, output)
+
+	// Debug: print full output to see what's happening
+	t.Logf("Compilation output: Contracts=%d, Errors=%d", len(output.Contracts), len(output.Errors))
+
+	if len(output.Contracts) == 0 {
+		t.Logf("No contracts in output. Errors: %+v", output.Errors)
+		if len(output.Errors) > 0 {
+			for _, err := range output.Errors {
+				t.Logf("Error: %s", err.FormattedMessage)
+			}
+		}
+		// Print the raw sources that were compiled
+		t.Logf("Input sources: %+v", input.Sources)
+	}
+	assert.NotEmpty(t, output.Contracts, "Should have compiled contracts")
 }
