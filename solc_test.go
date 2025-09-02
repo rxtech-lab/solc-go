@@ -561,7 +561,7 @@ func TestDownloadSolcBinary(t *testing.T) {
 	require.NoError(t, err, "Should resolve version for test")
 
 	// Download the binary
-	content, err := downloadSolcBinary(filename)
+	content, err := downloadSolcBinary("0.8.22", filename)
 	assert.NoError(t, err, "Should download binary successfully")
 	assert.NotEmpty(t, content, "Downloaded content should not be empty")
 
@@ -570,7 +570,7 @@ func TestDownloadSolcBinary(t *testing.T) {
 	assert.Contains(t, content, "function", "Content should contain function definitions")
 
 	// Test invalid filename
-	_, err = downloadSolcBinary("invalid-filename.js")
+	_, err = downloadSolcBinary("test-version", "invalid-filename.js")
 	assert.Error(t, err, "Should error for invalid filename")
 	assert.Contains(t, err.Error(), "HTTP", "Error should mention HTTP error")
 }
